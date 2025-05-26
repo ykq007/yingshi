@@ -732,10 +732,82 @@ function filterAdsFromM3U8(m3u8Content, strictMode = false) {
         return m3u8Content;
     }
 
+    // 检测是否是正常的分割文件结构
+    const discontinuityCount = (m3u8Content.match(/#EXT-X-DISCONTINUITY/g) || []).length;
+    const segmentsCount = (m3u8Content.match(/#EXTINF:/g) || []).length;
+    
+    // 检查是否是符合规律的时间间隔分布（如果间隔大于25个段，可能是合法的分割文件）
+    if (discontinuityCount > 0 && segmentsCount > 0) {
+        const avgSegmentsPerDiscontinuity = segmentsCount / discontinuityCount;
+        
+        // 如果是规律的结构，比如平均每25个段一个分隔标记，则可能是合法分割文件
+        if (avgSegmentsPerDiscontinuity >= 20) {
+            // 对于合法分割文件，不进行过滤，直接返回原始内容
+            return m3u8Content;
+        }
+    }
+
     // 按行分割M3U8内容
     const lines = m3u8Content.split('\n');
     const filteredLines = [];
     
+    // 分析内容模式
+    let isConsistentSegmentDuration = true;
+    let prevDuration = -1;
+    let discontinuityPattern = [];
+    
+    // 第一遍扫描分析文件结构
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // 收集分段时长数据
+        if (line.startsWith('#EXTINF:')) {
+            const durationMatch = line.match(/#EXTINF:(\d+\.?\d*)/i);
+            if (durationMatch && durationMatch[1]) {
+                const duration = parseFloat(durationMatch[1]);
+                
+                // 检查时长是否一致
+                if (prevDuration !== -1 && Math.abs(duration - prevDuration) > 0.5) {
+                    isConsistentSegmentDuration = false;
+                }
+                prevDuration = duration;
+            }
+        }
+        
+        // 记录不连续标记位置
+        if (line.includes('#EXT-X-DISCONTINUITY')) {
+            discontinuityPattern.push(i);
+        }
+    }
+    
+    // 判断是否是符合特定模式的影片（如模板中每75个分段一个分隔符）
+    if (isConsistentSegmentDuration && discontinuityPattern.length >= 2) {
+        // 检查是否有规律的间隔
+        let isRegularPattern = true;
+        let expectedInterval = 0;
+        
+        // 计算第一个间隔作为预期间隔
+        if (discontinuityPattern.length >= 2) {
+            expectedInterval = discontinuityPattern[1] - discontinuityPattern[0];
+            
+            // 检查其余间隔是否相同（允许10%的误差）
+            for (let i = 1; i < discontinuityPattern.length - 1; i++) {
+                const interval = discontinuityPattern[i+1] - discontinuityPattern[i];
+                if (Math.abs(interval - expectedInterval) > expectedInterval * 0.1) {
+                    isRegularPattern = false;
+                    break;
+                }
+            }
+            
+            // 如果是规律的间隔和一致的分段时长，这可能是合法的分割文件
+            if (isRegularPattern && isConsistentSegmentDuration) {
+                // 对于这种文件，不进行过滤，保留所有分隔符
+                return m3u8Content;
+            }
+        }
+    }
+    
+    // 如果不是规律模式，还需要进行过滤处理
     // 智能分析 - 跟踪可能的广告片段
     let potentialAdSegment = false;
     let segmentDuration = 0;
@@ -743,7 +815,6 @@ function filterAdsFromM3U8(m3u8Content, strictMode = false) {
     
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        const nextLine = i < lines.length - 1 ? lines[i + 1] : '';
         
         // 检测分段时长标记
         if (line.startsWith('#EXTINF:')) {
@@ -756,41 +827,13 @@ function filterAdsFromM3U8(m3u8Content, strictMode = false) {
         
         // 发现不连续标记，分析是否为广告
         if (line.includes('#EXT-X-DISCONTINUITY')) {
-            // 如果是非严格模式，保留不连续标记，避免导致播放问题
-            if (!strictMode) {
-                filteredLines.push(line);
-                continue;
-            }
-            
-            // 严格模式：分析上下文判断是否为广告分段
-            // 通常广告分段较短（小于10秒）或有特定标记
-            potentialAdSegment = segmentDuration > 0 && segmentDuration < 10;
-            
-            // 缓存当前行，等待判断是否保留
-            lineBuffer = [line];
+            // 由于前面已经过滤了规律的文件模式，这里保留原始的标记
+            // 大部分情况下应该保留标记，除非有明确的广告特征
+            filteredLines.push(line);
             continue;
         }
         
-        // 如果当前在分析潜在广告段
-        if (potentialAdSegment) {
-            // 如果遇到新的分段标记或文件结束，判断是否为广告
-            if (line.startsWith('#EXTINF:') || i === lines.length - 1) {
-                // 如果确定为广告段，丢弃缓存的行
-                // 否则将缓存的行添加到过滤结果中
-                if (!potentialAdSegment) {
-                    filteredLines.push(...lineBuffer);
-                }
-                
-                lineBuffer = [];
-                potentialAdSegment = false;
-            } else {
-                // 继续收集当前段的信息
-                lineBuffer.push(line);
-                continue;
-            }
-        }
-        
-        // 正常处理非广告行
+        // 其他行直接添加
         filteredLines.push(line);
     }
     
