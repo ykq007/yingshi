@@ -726,20 +726,74 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
 // 过滤可疑的广告内容
 function filterAdsFromM3U8(m3u8Content, strictMode = false) {
     if (!m3u8Content) return '';
+    
+    // 如果广告过滤被禁用，直接返回原始内容
+    if (!adFilteringEnabled) {
+        return m3u8Content;
+    }
 
     // 按行分割M3U8内容
     const lines = m3u8Content.split('\n');
     const filteredLines = [];
-
+    
+    // 智能分析 - 跟踪可能的广告片段
+    let potentialAdSegment = false;
+    let segmentDuration = 0;
+    let lineBuffer = [];
+    
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-
-        // 只过滤#EXT-X-DISCONTINUITY标识
-        if (!line.includes('#EXT-X-DISCONTINUITY')) {
-            filteredLines.push(line);
+        const nextLine = i < lines.length - 1 ? lines[i + 1] : '';
+        
+        // 检测分段时长标记
+        if (line.startsWith('#EXTINF:')) {
+            // 提取时长值，如 #EXTINF:4.5,
+            const durationMatch = line.match(/#EXTINF:(\d+\.?\d*)/i);
+            if (durationMatch && durationMatch[1]) {
+                segmentDuration = parseFloat(durationMatch[1]);
+            }
         }
+        
+        // 发现不连续标记，分析是否为广告
+        if (line.includes('#EXT-X-DISCONTINUITY')) {
+            // 如果是非严格模式，保留不连续标记，避免导致播放问题
+            if (!strictMode) {
+                filteredLines.push(line);
+                continue;
+            }
+            
+            // 严格模式：分析上下文判断是否为广告分段
+            // 通常广告分段较短（小于10秒）或有特定标记
+            potentialAdSegment = segmentDuration > 0 && segmentDuration < 10;
+            
+            // 缓存当前行，等待判断是否保留
+            lineBuffer = [line];
+            continue;
+        }
+        
+        // 如果当前在分析潜在广告段
+        if (potentialAdSegment) {
+            // 如果遇到新的分段标记或文件结束，判断是否为广告
+            if (line.startsWith('#EXTINF:') || i === lines.length - 1) {
+                // 如果确定为广告段，丢弃缓存的行
+                // 否则将缓存的行添加到过滤结果中
+                if (!potentialAdSegment) {
+                    filteredLines.push(...lineBuffer);
+                }
+                
+                lineBuffer = [];
+                potentialAdSegment = false;
+            } else {
+                // 继续收集当前段的信息
+                lineBuffer.push(line);
+                continue;
+            }
+        }
+        
+        // 正常处理非广告行
+        filteredLines.push(line);
     }
-
+    
     return filteredLines.join('\n');
 }
 
