@@ -723,7 +723,7 @@ class CustomHlsJsLoader extends Hls.DefaultConfig.loader {
     }
 }
 
-// 过滤可疑的广告内容
+// 过滤可疑的广告内容 - 暴力拆解模式
 function filterAdsFromM3U8(m3u8Content, strictMode = false) {
     if (!m3u8Content) return '';
     
@@ -732,104 +732,28 @@ function filterAdsFromM3U8(m3u8Content, strictMode = false) {
         return m3u8Content;
     }
 
-    // 检测是否是正常的分割文件结构
-    const discontinuityCount = (m3u8Content.match(/#EXT-X-DISCONTINUITY/g) || []).length;
-    const segmentsCount = (m3u8Content.match(/#EXTINF:/g) || []).length;
+    console.log('[m3u8_filter_ad] 暴力拆解模式已启用');
     
-    // 检查是否是符合规律的时间间隔分布（如果间隔大于25个段，可能是合法的分割文件）
-    if (discontinuityCount > 0 && segmentsCount > 0) {
-        const avgSegmentsPerDiscontinuity = segmentsCount / discontinuityCount;
-        
-        // 如果是规律的结构，比如平均每25个段一个分隔标记，则可能是合法分割文件
-        if (avgSegmentsPerDiscontinuity >= 20) {
-            // 对于合法分割文件，不进行过滤，直接返回原始内容
-            return m3u8Content;
-        }
-    }
-
     // 按行分割M3U8内容
     const lines = m3u8Content.split('\n');
     const filteredLines = [];
     
-    // 分析内容模式
-    let isConsistentSegmentDuration = true;
-    let prevDuration = -1;
-    let discontinuityPattern = [];
-    
-    // 第一遍扫描分析文件结构
+    // 暴力拆解模式：直接过滤所有 #EXT-X-DISCONTINUITY 标记
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         
-        // 收集分段时长数据
-        if (line.startsWith('#EXTINF:')) {
-            const durationMatch = line.match(/#EXTINF:(\d+\.?\d*)/i);
-            if (durationMatch && durationMatch[1]) {
-                const duration = parseFloat(durationMatch[1]);
-                
-                // 检查时长是否一致
-                if (prevDuration !== -1 && Math.abs(duration - prevDuration) > 0.5) {
-                    isConsistentSegmentDuration = false;
-                }
-                prevDuration = duration;
-            }
-        }
-        
-        // 记录不连续标记位置
+        // 发现不连续标记，直接过滤
         if (line.includes('#EXT-X-DISCONTINUITY')) {
-            discontinuityPattern.push(i);
-        }
-    }
-    
-    // 判断是否是符合特定模式的影片（如模板中每75个分段一个分隔符）
-    if (isConsistentSegmentDuration && discontinuityPattern.length >= 2) {
-        // 检查是否有规律的间隔
-        let isRegularPattern = true;
-        let expectedInterval = 0;
-        
-        // 计算第一个间隔作为预期间隔
-        if (discontinuityPattern.length >= 2) {
-            expectedInterval = discontinuityPattern[1] - discontinuityPattern[0];
-            
-            // 检查其余间隔是否相同（允许10%的误差）
-            for (let i = 1; i < discontinuityPattern.length - 1; i++) {
-                const interval = discontinuityPattern[i+1] - discontinuityPattern[i];
-                if (Math.abs(interval - expectedInterval) > expectedInterval * 0.1) {
-                    isRegularPattern = false;
-                    break;
-                }
+            // 检查当前行是否跟 #EXT-X-PLAYLIST-TYPE 相关
+            // 这种特殊情况下保留标记，避免影响播放器结构判断
+            if (i > 0 && lines[i - 1].startsWith('#EXT-X-PLAYLIST-TYPE')) {
+                console.log('[m3u8_filter_ad] 保留与 #EXT-X-PLAYLIST-TYPE 相关的标记');
+                filteredLines.push(line);
+            } else {
+                console.log('[m3u8_filter_ad] 过滤规则: #EXT-X-DISCONTINUITY-单个标识过滤');
+                console.log('[m3u8_filter_ad] 过滤的行:', line);
+                // 不添加到结果中，即过滤掉该行
             }
-            
-            // 如果是规律的间隔和一致的分段时长，这可能是合法的分割文件
-            if (isRegularPattern && isConsistentSegmentDuration) {
-                // 对于这种文件，不进行过滤，保留所有分隔符
-                return m3u8Content;
-            }
-        }
-    }
-    
-    // 如果不是规律模式，还需要进行过滤处理
-    // 智能分析 - 跟踪可能的广告片段
-    let potentialAdSegment = false;
-    let segmentDuration = 0;
-    let lineBuffer = [];
-    
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        
-        // 检测分段时长标记
-        if (line.startsWith('#EXTINF:')) {
-            // 提取时长值，如 #EXTINF:4.5,
-            const durationMatch = line.match(/#EXTINF:(\d+\.?\d*)/i);
-            if (durationMatch && durationMatch[1]) {
-                segmentDuration = parseFloat(durationMatch[1]);
-            }
-        }
-        
-        // 发现不连续标记，分析是否为广告
-        if (line.includes('#EXT-X-DISCONTINUITY')) {
-            // 由于前面已经过滤了规律的文件模式，这里保留原始的标记
-            // 大部分情况下应该保留标记，除非有明确的广告特征
-            filteredLines.push(line);
             continue;
         }
         
